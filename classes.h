@@ -69,16 +69,48 @@ public:
 
         // Create your EmployeeIndex file and write out the initial 4 buckets
         // make sure to account for the created buckets by incrementing nextFreeBlock appropriately
-      
+
+            ofstream indexFile(fName);
+            if (!indexFile.is_open()) {
+            throw runtime_error("ERROR: The index file could not be opened.");
+            }
+
+        // Do we have a bucket defined or do we define it??
+        // ** All I have so far **
     }
 
     // Read csv file and add records to the index
+
+    // -- Using same function from assignment 2 to read in the CSV data for now //
+    // See if it still works
     void createFromFile(string csvFName) {
-        
+        ifstream csvFile(csvFName);
+        if (!csvFile.is_open()) {
+            throw runtime_error("Error!!! The csvFile could not be opened!");
+        }
+
+        string line;
+        while (getline(csvFile, line)) {
+            istringstream ss(line);
+            vector<string> fields;
+            string field;
+            while (getline(ss, field, ',')) {
+                fields.push_back(field);
+            }
+
+            Record record(fields);
+            addRecordToIndex(record);
+        }
     }
 
     // Given an ID, find the relevant record and print it
     Record findRecordById(int id) {
-        
+        cout << "Searching for Record ID: " << id << endl;
+        ifstream file("EmployeeIndex");
+        if (!file.is_open()) {
+            throw runtime_error("Unable to open the file.");
+        }
+
+        // Implement search function for the ID parameter
     }
 };
