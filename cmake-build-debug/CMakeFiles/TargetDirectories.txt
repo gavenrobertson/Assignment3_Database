@@ -1,0 +1,3 @@
+/Users/jorgealejandre/Documents/OSU/CS440/Assignment3_Database/cmake-build-debug/CMakeFiles/Assignment3_Database.dir
+/Users/jorgealejandre/Documents/OSU/CS440/Assignment3_Database/cmake-build-debug/CMakeFiles/edit_cache.dir
+/Users/jorgealejandre/Documents/OSU/CS440/Assignment3_Database/cmake-build-debug/CMakeFiles/rebuild_cache.dir

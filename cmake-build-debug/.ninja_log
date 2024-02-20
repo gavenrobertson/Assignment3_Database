@@ -1,0 +1,11 @@
+# ninja log v5
+1	216	1708461539906501306	build.ninja	fff8adac9bc0dfc8
+0	5	0	clean	ad90e366ad70d77b
+4	822	1708461345990960985	CMakeFiles/Assignment3_Database.dir/main.cpp.o	6801d59e47af5009
+824	996	1708461346166306829	Assignment3_Database	3d1cfdd6281cff1a
+0	46	1708461539906501306	build.ninja	fff8adac9bc0dfc8
+0	3	0	clean	ad90e366ad70d77b
+4	771	1708461542266860017	CMakeFiles/Assignment3_Database.dir/main.cpp.o	6801d59e47af5009
+772	931	1708461542427367991	Assignment3_Database	3d1cfdd6281cff1a
+4	814	1708461768236160765	CMakeFiles/Assignment3_Database.dir/main.cpp.o	6801d59e47af5009
+815	976	1708461768401161819	Assignment3_Database	3d1cfdd6281cff1a
