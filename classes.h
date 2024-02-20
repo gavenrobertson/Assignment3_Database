@@ -1,347 +1,442 @@
 #include <string>
 #include <vector>
-#include <string>
 #include <iostream>
 #include <sstream>
 #include <bitset>
+#include <fstream>
+#include <cmath>
+#include <cstdio>
+#include <cstdint>
 using namespace std;
 
-class Record {
+class Record
+{
 public:
     int id, manager_id;
     std::string bio, name;
 
-    Record(vector<std::string> fields) {
+    Record(vector<std::string> fields)
+    {
         id = stoi(fields[0]);
         name = fields[1];
         bio = fields[2];
         manager_id = stoi(fields[3]);
     }
 
-    bool operator==(const Record &other) const {
-        return id == other.id; // or any other logic that defines equality
-    }
-
-    void print() {
+    void print()
+    {
         cout << "\tID: " << id << "\n";
         cout << "\tNAME: " << name << "\n";
         cout << "\tBIO: " << bio << "\n";
         cout << "\tMANAGER_ID: " << manager_id << "\n";
     }
 
-    // Convert Record to a delimited string
-    std::string toDelimitedString() const {
-        std::ostringstream ss;
-        ss << id << "," << name << "," << bio << "," << manager_id; // Use comma as delimiter
-        return ss.str();
+    // Calculate size of record to determine if it can fit in block
+    int getSize() {
+        // Include the size for all fields, delimiters, and a newline
+        return to_string(id).length() + name.length() + bio.length() + to_string(manager_id).length() + 3 /* commas */ + 1 /* newline */;
     }
 
-    // Initialize a Record from a delimited string
-    static Record fromDelimitedString(const std::string &data) {
-        std::istringstream ss(data);
-        std::vector<std::string> fields;
-        std::string field;
+    void writeRecord(fstream &indexFile)
+    {
+        indexFile << id << ',' << name << ',' << bio << ',' << manager_id << '\n';
+    }
+};
 
-        while (std::getline(ss, field, ',')) { // Use comma as delimiter
+class Block
+{
+private:
+    const int PAGE_SIZE = 4096;
+
+public:
+    vector<Record> records;
+
+    int blockSize;
+    int overflowPtrIdx;
+    int numRecords;
+    int blockIdx;
+
+    Block()
+    {
+        blockSize = 0;
+        blockIdx = 0;
+    }
+
+    Block(int physIdx)
+    {
+        blockSize = 0;
+        blockIdx = physIdx;
+    }
+
+    void readBlock(fstream &inputFile)
+    {
+
+        inputFile.seekg(blockIdx * PAGE_SIZE);
+
+        inputFile.read(reinterpret_cast<char *>(&overflowPtrIdx), sizeof(overflowPtrIdx));
+        inputFile.read(reinterpret_cast<char *>(&numRecords), sizeof(numRecords));
+
+        blockSize += 8;
+
+        for (int i = 0; i < numRecords; i++)
+        {
+            readRecord(inputFile);
+            blockSize += records[i].getSize();
+        }
+    }
+
+    void readRecord(fstream &inputFile) {
+        string recordLine;
+        if (!getline(inputFile, recordLine)) return; // Read a whole line for a record
+
+        stringstream ss(recordLine);
+        string field;
+        vector<string> fields;
+
+        while (getline(ss, field, ',')) {
             fields.push_back(field);
         }
 
-        if (fields.size() >= 4) { // Assuming at least 4 fields are present
-            return Record(fields);
-        } else {
-            throw std::runtime_error("Invalid data format");
+        if (fields.size() >= 4) { // Ensure there are enough fields
+            records.push_back(Record(fields));
         }
-    };
-
+    }
 };
 
-    class Bucket {
-    public:
-        std::vector<Record> records;
-        int overflowOffset = -1;
-        const double PAGE_USAGE_THRESHOLD = 0.7;
+class LinearHashIndex
+{
 
-
-        // Method to serialize the bucket, including the overflow pointer
-        std::string serialize() const {
-            std::string bucketData;
-            for (const auto& record : records) {
-                bucketData += record.toDelimitedString();
-            }
-            bucketData += std::to_string(overflowOffset) + "|"; // Append overflow pointer
-            return bucketData;
-        }
-
-        // Deserialize and add records from a delimited string to the bucket
-        void deserialize(const std::string& bucketData) {
-            std::istringstream ss(bucketData);
-            std::string recordData;
-
-            while (std::getline(ss, recordData, '|')) {
-                try {
-                    records.push_back(Record::fromDelimitedString(recordData));
-                } catch (const std::runtime_error& e) {
-                    std::cerr << "Error parsing record: " << e.what() << std::endl;
-                    // Handle error or continue parsing next record
-                }
-            }
-        }
-
-        // Method to check if the bucket is full
-        bool isFull(int blockSize) const {
-            // Calculate 70% of the blockSize
-            int threshold = static_cast<int>(blockSize * PAGE_USAGE_THRESHOLD);
-            // Check if the serialized data exceeds this threshold
-            return serialize().length() > threshold;
-        }
-
-    };
-
-class LinearHashIndex {
 private:
-    const int BLOCK_SIZE = 4096;
+    const int PAGE_SIZE = 4096;
 
+    vector<int> pageDirectory;
+    int numBlocks;
 
-    vector<int> blockDirectory; // Map the least-significant-bits of h(id) to a bucket location in EmployeeIndex (e.g., the jth bucket)
-    // can scan to correct bucket using j*BLOCK_SIZE as offset (using seek function)
-    // can initialize to a size of 256 (assume that we will never have more than 256 regular (i.e., non-overflow) buckets)
-    int n;  // The number of indexes in blockDirectory currently being used
-    int i;    // The number of least-significant-bits of h(id) to check. Will need to increase i once n > 2^i
-    int numRecords;    // Records currently in index. Used to test whether to increase n
-    int nextFreeBlock; // Next place to write a bucket. Should increment it by BLOCK_SIZE whenever a bucket is written to EmployeeIndex
-    string fName;      // Name of index file
+    int numBuckets;
+    int i;
+    int numRecords;   // Records in index
+    int nextFreePage; // Next page to write to
+    string fName;     // Name of output index file
 
+    int numOverflowBlocks;
 
-    int writeBucketToFile(const Bucket &bucket) {
-        fstream indexFile(fName,
-                          ios::in | ios::out | ios::binary | ios::ate); // Open file for reading, writing, and append
-        int position = indexFile.tellp(); // Get the current end of file position
-        std::string bucketData = bucket.serialize(); // Serialize the bucket
-        indexFile.write(bucketData.c_str(), bucketData.length()); // Write the bucket data
-        indexFile.close();
-        return position; // Return the position where the bucket was written
+    int currentTotalSize;
+
+    Record getRecord(fstream &recordIn)
+    {
+        string line, word;
+        vector<std::string> fields;
+
+        if (!getline(recordIn, line, '\n'))
+        {
+            fields.push_back("-1");
+            fields.push_back("-1");
+            fields.push_back("-1");
+            fields.push_back("-1");
+            return Record(fields);
+        }
+        else
+        {
+            stringstream s(line);
+
+            getline(s, word, ',');
+            fields.push_back(word);
+            getline(s, word, ',');
+            fields.push_back(word);
+            getline(s, word, ',');
+            fields.push_back(word);
+            getline(s, word, ',');
+            fields.push_back(word);
+
+            return Record(fields);
+        }
     }
 
+    int hash(int id)
+    {
+        return (id % (int)pow(2, 16));
+    }
 
-    // Insert new record into index
-    void insertRecord(const Record &record) {
-        // Calculate if any bucket exceeds the 70% threshold before inserting the new record
-        bool needsResizing = false;
-        for (const auto& position : blockDirectory) {
-            if (position != -1) { // Assuming -1 indicates an unused entry
-                Bucket bucket = readBucketAtPosition(position * BLOCK_SIZE);
-                if (bucket.isFull(BLOCK_SIZE)) {
-                    needsResizing = true;
-                    break;
+    int getLastIthBits(int hashVal, int i)
+    {
+        return hashVal & ((1 << i) - 1);
+    }
+
+    int initBucket(fstream &indexFile)
+    {
+
+        int overflowIdx = -1;
+        int defaultNumRecords = 0;
+
+        indexFile.seekp(nextFreePage * PAGE_SIZE);
+
+        indexFile.write(reinterpret_cast<const char *>(&overflowIdx), sizeof(overflowIdx));
+        indexFile.write(reinterpret_cast<const char *>(&defaultNumRecords), sizeof(defaultNumRecords));
+
+        pageDirectory.push_back(nextFreePage++);
+        numBlocks++;
+        numBuckets++;
+
+        // Update current total size
+        currentTotalSize += sizeof(overflowIdx) + sizeof(defaultNumRecords);
+
+        return pageDirectory.size() - 1;
+    }
+
+    int initOverflowBlock(int parentBlockIdx, fstream &indexFile)
+    {
+
+        int overflowIdx = -1;
+        int defaultNumRecords = 0;
+
+        // Get index of current overflow block
+        int currIdx = nextFreePage++;
+
+        indexFile.seekp(currIdx * PAGE_SIZE);
+
+        indexFile.write(reinterpret_cast<const char *>(&overflowIdx), sizeof(overflowIdx));
+        indexFile.write(reinterpret_cast<const char *>(&defaultNumRecords), sizeof(defaultNumRecords));
+
+        indexFile.seekp(parentBlockIdx * PAGE_SIZE);
+        indexFile.write(reinterpret_cast<const char *>(&currIdx), sizeof(currIdx));
+
+        currentTotalSize += sizeof(overflowIdx) + sizeof(defaultNumRecords);
+
+        // Update number of overflow blocks and blocks
+        numBlocks++;
+        numOverflowBlocks++;
+
+        return currIdx;
+    }
+
+    int initEmptyBlock(fstream &indexFile)
+    {
+
+        int overflowIdx = -1;
+        int defaultNumRecords = 0;
+
+        // Get index for current block
+        int currIdx = nextFreePage++;
+
+        indexFile.seekp(currIdx * PAGE_SIZE);
+
+        indexFile.write(reinterpret_cast<const char *>(&overflowIdx), sizeof(overflowIdx));
+        indexFile.write(reinterpret_cast<const char *>(&defaultNumRecords), sizeof(defaultNumRecords));
+
+        // Update current total size
+        currentTotalSize += sizeof(overflowIdx) + sizeof(defaultNumRecords);
+
+        numBlocks++;
+
+        return currIdx;
+    }
+
+    // Write a record to a given position in the index file and update record count
+    void writeRecordAndUpdateCountInPosition(Record &record, int pos, double totalBlocksize, int newNumRecords, fstream &indexFile)
+    {
+        indexFile.seekp(totalBlocksize);
+        record.writeRecord(indexFile);
+        indexFile.seekp(pos + sizeof(int));
+        indexFile.write(reinterpret_cast<const char *>(&newNumRecords), sizeof(newNumRecords));
+
+        // Update current total size
+        currentTotalSize += record.getSize();
+    }
+
+    // Get overflow index and write record to overflow block
+    void writeRecordToOverflowBlock(Record &record, int baseBlockPgIdx, fstream &indexFile)
+    {
+        int overflowIdx = initOverflowBlock(baseBlockPgIdx, indexFile);
+        int pos = (overflowIdx * PAGE_SIZE);
+        writeRecordAndUpdateCountInPosition(record, pos, pos + sizeof(int) + sizeof(int), 1, indexFile);
+    }
+
+    void writeRecordToIndexFile(Record record, int baseBlockPgIdx, fstream &indexFile)
+    {
+        bool hasWrittenRecord = false;
+        while (!hasWrittenRecord)
+        {
+            Block currBlock(baseBlockPgIdx);
+            currBlock.readBlock(indexFile);
+            if (currBlock.blockSize + record.getSize() <= PAGE_SIZE)
+            {
+                int pos = (baseBlockPgIdx * PAGE_SIZE);
+                double totalBlocksize = pos + currBlock.blockSize;
+                writeRecordAndUpdateCountInPosition(record, pos, totalBlocksize, currBlock.numRecords + 1, indexFile);
+                hasWrittenRecord = true;
+            }
+            else if (currBlock.overflowPtrIdx != -1)
+            {
+                baseBlockPgIdx = currBlock.overflowPtrIdx;
+            }
+            else
+            {
+                writeRecordToOverflowBlock(record, baseBlockPgIdx, indexFile);
+                hasWrittenRecord = true;
+            }
+        }
+    }
+
+    // Initialize buckets if no records are present
+    void initBucketsIfNecessary(fstream &indexFile)
+    {
+        if (numRecords == 0)
+        {
+            for (int i = 0; i < 2; i++)
+            {
+                initBucket(indexFile);
+            }
+            i = 1;
+        }
+    }
+
+    // Write a record to the index file and update record count
+    void writeRecordAndUpdateCount(Record &record, int pgIdx, fstream &indexFile)
+    {
+        writeRecordToIndexFile(record, pgIdx, indexFile);
+        numRecords++;
+    }
+
+    // Handle situation if bucket overflows
+    void handleBucketOverflow(fstream &indexFile)
+    {
+        double avgCapacityPerBucket = (double)currentTotalSize / numBuckets;
+        double pageSizeMul = 0.7 * PAGE_SIZE;
+
+        if (avgCapacityPerBucket > pageSizeMul)
+        {
+            int newBucketIdx = initBucket(indexFile);
+
+            int digitsToAddressNewBucket = (int)ceil(log2(numBuckets));
+
+            int bucketToTransferFromIdx = newBucketIdx;
+            bucketToTransferFromIdx &= ~(1 << (digitsToAddressNewBucket - 1));
+
+            int bucketToTransferFromPageIdx = pageDirectory[bucketToTransferFromIdx];
+
+            int newOldBucketPageIdx = initEmptyBlock(indexFile);
+
+            while (bucketToTransferFromPageIdx != -1)
+            {
+
+                Block oldBlock(bucketToTransferFromPageIdx);
+                oldBlock.readBlock(indexFile);
+
+                indexFile.seekp(oldBlock.blockIdx * PAGE_SIZE);
+                indexFile << string(PAGE_SIZE, '*');
+
+                numBlocks--;
+                numOverflowBlocks--;
+
+                currentTotalSize -= oldBlock.blockSize;
+                numRecords -= oldBlock.numRecords;
+
+                for (int i = 0; i < oldBlock.numRecords; i++)
+                {
+
+                    if (getLastIthBits(hash(oldBlock.records[i].id), digitsToAddressNewBucket) != newBucketIdx)
+                    {
+                        int tempNewOldBlockPgIdx = newOldBucketPageIdx;
+                        writeRecordToIndexFile(oldBlock.records[i], tempNewOldBlockPgIdx, indexFile);
+                    }
+                    else
+                    {
+                        int newBucketBlockPgIdx = pageDirectory[newBucketIdx];
+                        writeRecordToIndexFile(oldBlock.records[i], newBucketBlockPgIdx, indexFile);
+                    }
+                    numRecords++;
                 }
+                bucketToTransferFromPageIdx = oldBlock.overflowPtrIdx;
             }
+
+            numOverflowBlocks++;
+
+            pageDirectory[bucketToTransferFromIdx] = newOldBucketPageIdx;
+
+            i = digitsToAddressNewBucket;
         }
-
-        // Resize index if needed
-        if (needsResizing) {
-            resizeIndex();
-        }
-
-        // Proceed with the original insertion logic
-        int bucketIndex = record.id % (1 << i);
-        if (bucketIndex < n) {
-            bucketIndex = record.id % (1 << (i + 1)); // Adjust for linear hashing if needed
-        }
-
-        // Calculate the position in the file based on the bucket index
-        int position = blockDirectory[bucketIndex] * BLOCK_SIZE;
-
-        Bucket bucket = readBucketAtPosition(position);
-
-        if (!bucket.isFull(BLOCK_SIZE)) {
-            bucket.records.push_back(record);
-            numRecords++; // Increment total record count after successful insertion
-        } else {
-            handleOverflow(bucket, record, position);
-        }
-
-        // Write the (potentially updated) primary bucket back to the file
-        fstream indexFile(fName, ios::in | ios::out | ios::binary);
-        indexFile.seekp(position); // Go back to the primary bucket's position
-        std::string updatedBucketData = bucket.serialize();
-        indexFile.write(updatedBucketData.c_str(), updatedBucketData.length());
-        indexFile.close();
     }
 
-    void resizeIndex() {
-        // Increment 'n' and adjust 'i' if necessary
-        n++;
-        if (n > (1 << i)) {
-            i++;
+    void insertRecord(Record record, fstream &indexFile)
+    {
+        initBucketsIfNecessary(indexFile);
+        int bucketIdx = getLastIthBits(hash(record.id), i);
+        if (bucketIdx >= numBuckets)
+        {
+            bucketIdx &= ~(1 << (i - 1));
         }
-
-        // Identify the split bucket that needs rehashing
-        int splitBucketIndex = n - 1;
-
-        // Load the split bucket
-        int position = blockDirectory[splitBucketIndex] * BLOCK_SIZE;
-        Bucket splitBucket = readBucketAtPosition(position);
-
-        // Vector to store records that need to be moved to a new bucket
-        vector<Record> recordsToMove;
-
-        // Iterate over records in the split bucket to determine which need rehashing
-        for (const auto& record : splitBucket.records) {
-            int newBucketIndex = record.id % (1 << i);
-            if (newBucketIndex != splitBucketIndex) {
-                recordsToMove.push_back(record);
-            }
-        }
-
-        // Remove records that are moving to a new bucket
-        splitBucket.records.erase(
-                remove_if(splitBucket.records.begin(), splitBucket.records.end(), [&](const Record& record) {
-                    return find(recordsToMove.begin(), recordsToMove.end(), record) != recordsToMove.end();
-                }), splitBucket.records.end());
-
-        // Update the split bucket in the file
-        updateBucketInFile(splitBucket, position);
-
-        // Initialize and write the new bucket
-        Bucket newBucket;
-        for (const auto& record : recordsToMove) {
-            // Handle the new bucket insertion, considering possible overflow
-            newBucket.records.push_back(record);
-        }
-
-        // Write the new bucket to the file and update the directory
-        int newPosition = writeBucketToFile(newBucket);
-        blockDirectory.push_back(newPosition / BLOCK_SIZE);
+        int pgIdx = pageDirectory[bucketIdx];
+        writeRecordAndUpdateCount(record, pgIdx, indexFile);
+        handleBucketOverflow(indexFile);
     }
-
-
-
-    void handleOverflow(Bucket& currentBucket, const Record& record, int& currentBucketPosition) {
-        // Open the file for binary read and write
-        fstream indexFile(fName, ios::in | ios::out | ios::binary);
-
-        if (currentBucket.overflowOffset == -1) {  // No existing overflow
-            Bucket newOverflowBucket;
-            newOverflowBucket.records.push_back(record);
-            int newOverflowPosition = writeBucketToFile(newOverflowBucket);
-            currentBucket.overflowOffset = newOverflowPosition;
-
-            // Update the current bucket with the new overflowOffset
-            indexFile.seekp(currentBucketPosition);
-            indexFile.write(currentBucket.serialize().c_str(), currentBucket.serialize().length());
-        } else {  // Existing overflow
-            int overflowPosition = currentBucket.overflowOffset;
-            Bucket overflowBucket = readBucketAtPosition(overflowPosition);
-
-            if (overflowBucket.isFull(BLOCK_SIZE)) {
-                // Recursively handle further overflow in the chain
-                handleOverflow(overflowBucket, record, overflowPosition);
-                // Update the overflow bucket if a new overflow was added in the recursion
-                indexFile.seekp(overflowPosition);
-                indexFile.write(overflowBucket.serialize().c_str(), overflowBucket.serialize().length());
-            } else {
-                overflowBucket.records.push_back(record);
-                // Update the overflow bucket directly
-                indexFile.seekp(overflowPosition);
-                indexFile.write(overflowBucket.serialize().c_str(), overflowBucket.serialize().length());
-            }
-        }
-
-        indexFile.close();
-    }
-
-    void updateBucketInFile(const Bucket& bucket, int position) {
-        fstream indexFile(fName, ios::in | ios::out | ios::binary);
-        indexFile.seekp(position);
-        std::string bucketData = bucket.serialize();
-        indexFile.write(bucketData.c_str(), bucketData.length());
-        indexFile.close();
-    }
-
-    Bucket readBucketAtPosition(int position) {
-        fstream indexFile(fName, ios::in | ios::binary);
-        indexFile.seekg(position);
-        std::string bucketData;
-        std::getline(indexFile, bucketData, '|'); // Assume each bucket ends with a '|'
-        indexFile.close();
-        Bucket bucket;
-        bucket.deserialize(bucketData);
-        return bucket;
-    }
-
-
 
 public:
-    LinearHashIndex(string indexFileName) : fName(indexFileName) {
-    n = 4; // Start with 4 buckets in index
-    i = 2; // Need 2 bits to address 4 buckets
-    numRecords = 0;
-    nextFreeBlock = BLOCK_SIZE * n; // Assuming the initial buckets are written back-to-back
-    blockDirectory.resize(256, -1); // Initialize with -1 indicating unused
-
-    // Open the index file in binary mode
-    ofstream indexFile(fName, ios::binary | ios::out);
-
-    // Check if the file is successfully opened
-    if (!indexFile) {
-        cerr << "Cannot open index file: " << fName << endl;
-        exit(1);
+    LinearHashIndex(string indexFileName)
+    {
+        numBlocks = 0;
+        i = 0;
+        numRecords = 0;
+        numBuckets = 0;
+        fName = indexFileName;
+        numOverflowBlocks = 0;
+        currentTotalSize = 0;
+        nextFreePage = 0;
     }
 
-        // Dynamically allocate the emptyBucket array
-        char* emptyBucket = new char[BLOCK_SIZE];
+    void createFromFile(string csvFName)
+    {
+        fstream indexFile(fName, ios::in | ios::out | ios::trunc | ios::binary);
+        fstream inputFile(csvFName, ios::in);
 
-        // Initialize the array
-        memset(emptyBucket, 0, BLOCK_SIZE);
+        if (inputFile.is_open())
+            cout << "Employee.csv opened" << endl;
 
+        bool recordsRemaining = true;
 
-    for (int j = 0; j < n; ++j) {
-        blockDirectory[j] = j * BLOCK_SIZE; // Set directory to point to the start of each bucket
-        indexFile.write(emptyBucket, BLOCK_SIZE); // Write an empty bucket to the file
-    }
+        while (recordsRemaining)
+        {
+            Record singleRec = getRecord(inputFile);
 
-    delete[] emptyBucket;
-
-    indexFile.close();
-}
-
-    // Read csv file and add records to the index
-    void createFromFile(const string& csvFName) {
-        ifstream csvFile(csvFName);
-        if (!csvFile.is_open()) {
-            cerr << "Failed to open file: " << csvFName << endl;
-            return;
-        }
-
-        string line;
-        while (getline(csvFile, line)) {
-            istringstream ss(line);
-            vector<string> fields;
-            string field;
-
-            while (getline(ss, field, ',')) {  // Assuming fields are comma-separated
-                fields.push_back(field);
+            if (singleRec.id == -1)
+            {
+                recordsRemaining = false;
             }
-
-            if (fields.size() != 4) {  // Assuming each line should have 4 fields
-                cerr << "Invalid line format: " << line << endl;
-                continue;  // Skip this line and move to the next
-            }
-
-            try {
-                Record record(fields);  // Create a record from the fields
-                insertRecord(record);   // Insert the record into the index
-            } catch (const exception& e) {
-                cerr << "Failed to create or insert record: " << e.what() << endl;
+            else
+            {
+                insertRecord(singleRec, indexFile);
             }
         }
-
-        csvFile.close();
+        indexFile.close();
+        inputFile.close();
     }
 
+    Record findRecordById(int id)
+    {
+        fstream indexFile(fName, ios::in);
 
-    // Given an ID, find the relevant record and print it
-    //Record findRecordById(int id) {
-        
-   // }
+        int bucketIdx = getLastIthBits(hash(id), i);
+
+        if (bucketIdx >= numBuckets)
+        {
+            bucketIdx &= ~(1 << (i - 1));
+        }
+
+        int pgIdx = pageDirectory[bucketIdx];
+
+        while (pgIdx != -1)
+        {
+            Block currBlock(pgIdx);
+            currBlock.readBlock(indexFile);
+
+            for (int i = 0; i < currBlock.numRecords; i++)
+            {
+                if (currBlock.records[i].id == id)
+                    return currBlock.records[i];
+            }
+            cout << "Record not found";
+
+            pgIdx = currBlock.overflowPtrIdx;
+        }
+        indexFile.close();
+    }
 };
